@@ -1,0 +1,725 @@
+---
+title: "Midterm Strawberry - EDA"
+author: "Yeyang Han, Tianjian Xie, Hao He, Yaquan Yang"
+date: "2022-11-09"
+output:
+  pdf_document: default
+  html_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(magrittr)
+library(readxl)
+library(treemap)
+```
+
+# Read data and data wrangling
+First, read the dataset into Rstudio. After having an overview of all the columns and their data structure, we start with dropping useless columns. Then we cleaned the Data Item column, but we still need to take care of Domain and Domain Category columns.
+```{r}
+# strawb
+strawb <- read_xlsx("strawberries-2022oct30-a.xlsx")
+
+# Get the column names and index them
+cnames <- colnames(strawb)
+x <- 1:dim(strawb)[2]
+
+# Delete useless columns
+T <- NULL
+for(i in x){T <- c(T, dim(unique(strawb[i]))[1])}
+drop_cols <- cnames[which(T == 1)]
+strawb <-strawb %>% dplyr::select(!all_of(drop_cols))
+strawb <-strawb %>% arrange(Year, State)
+
+# Separate many information stored in `Data Item` column into 4 columns
+strawb <- strawb %>% separate(col=`Data Item`,
+                    into = c("Strawberries", "type", "items", "units"),
+                    sep = ",",
+                    fill = "right")
+```
+ 
+
+Before we separate these two columns, we create two figures to see if there are any patterns for chemicals used in different states and have a initial view of prices for strawberries.
+
+```{r message=F,warning=F,fig.width=9.3,echo=FALSE}
+## Plot-Chemicals used in different states
+plot2.data<-strawb %>% 
+    filter(
+        str_detect(`Domain Category`,'(CHEMICAL|FERTILIZER)'),
+        #State=='CALIFORNIA',
+        str_detect(Value,'^\\d+$')) %>%
+    filter(Value != "(NA)" & Value != "(D)" ) %>%
+    mutate(Value=as.numeric(Value),
+           State= as.character(State),
+           Domain=ordered(Domain,c('CHEMICAL, HERBICIDE','CHEMICAL, INSECTICIDE','CHEMICAL, FUNGICIDE','CHEMICAL, OTHER','FERTILIZER')))
+
+ggplot(plot2.data,aes(x=State,y=Value,fill=Domain))+
+    geom_bar(stat='identity',width = 0.6,position= 'dodge')+
+    theme_bw()+ 
+    scale_y_continuous(trans='log10')+
+    scale_fill_hue()+labs(title=' Figure 1 - CHEMICAL usage in different states')
+
+# plot2.data %>% group_by(State,Domain) %>% summarise(sum(as.numeric(Value)))
+```
+In Figure 1 we can see that there are three states that use chemicals and fertilizers: California, Florida and Oregon. California uses more fertilizers and chemicals overall than the other two states. 
+For California, the most used are fertilizer, followed by chemical-other, fungicide, pesticides and herbicides. Fertilizer and fungicides were the most used in Florida. 
+
+```{r,message=F,warning=F, fig.height= 7, fig.width=9.3,echo=FALSE}
+## Plot-STRAWBERRIES - PRICE RECEIVED
+plot3.data<-strawb %>% 
+    filter(Strawberries=='STRAWBERRIES - PRICE RECEIVED') %>%
+    mutate(Value=as.numeric(Value),
+           Year=as.character(Year))
+
+ggplot(plot3.data,aes(y=State,x=Year,size=Value,fill=State))+
+    geom_point(shape=21)+
+    theme_bw()+
+    geom_text(aes(label=Value),size=4,nudge_y=0.2)+
+    scale_size_continuous(range=c(2,16))+
+    labs(size='PRICE RECEIVED',title='Figure 2 -STRAWBERRIES - PRICE RECEIVED')
+```
+
+In Figure 2 we can see information on strawberry price received in the five states from 2016-2021. New York and Florida have higher values in this category than other states.
+
+Now, looking at the `domain category` column, it may be better for further analysis if we separate the *strawb* dataset into three subsets: organic, non-organic -- and commercial vs chemicals in each.
+*chemicals used in strawberry cultivation* (pesticides, insecticides, fertilizers, fungicides, herbicides, and others)
+*sales of organic strawberries*
+*sales of non-organic strawberries*
+
+We starts with filtering all the organic entries from the whole dataset to create organic and non-organic subsets. Next, we continue to separate the chemical data from non-organic data because they have more elaborate information of chemicals than that of organic data. Finally, we got all rows of chemical data for creating the chemicals subset.
+```{r}
+# Find all organic entries
+
+# Type: 62 rows
+type_organic <- grep("organic", 
+                     strawb$type, 
+                     ignore.case = T)
+# Zero rows returned 
+items_organic <- grep("organic", 
+                      strawb$items, 
+                      ignore.case = T)  ## nothing here
+# Domain: 62 rows
+Domain_organic <- grep("organic", 
+                       strawb$Domain, 
+                       ignore.case = T)
+# Domain Category: 62 rows
+Domain_Category_organic <- grep("organic", 
+                                strawb$`Domain Category`, 
+                                ignore.case = T)
+org_rows <- intersect(type_organic, Domain_organic)
+
+# Use slice function get organic and non-organic strawberries subsets
+strawb_organic <- strawb %>% slice(org_rows, preserve = FALSE)
+strawb_non_organic <- strawb %>% filter(!row_number() %in% org_rows)
+
+# Checmicals (used in strawberry cultivation) subset
+chem_rows <- grep("BEARING - APPLICATIONS", 
+                  strawb_non_organic$type, 
+                  ignore.case = T)
+chem_rows_1 <- grep("chemical", 
+                    strawb_non_organic$Domain, 
+                    ignore.case = T)
+ins <- intersect(chem_rows, chem_rows_1)
+chem_rows_2 <- grep("chemical", 
+                    strawb_non_organic$`Domain Category`, 
+                    ignore.case = T)
+ins_2 <- intersect(chem_rows, chem_rows_2)
+
+strawb_chem <- strawb_non_organic %>% slice(chem_rows, preserve = FALSE)
+```
+
+
+##  Cleaning three tibbles (subsets)
+
+### Chemical data subset
+
+Write a function to drop columns that contain useless information. It's easy to find that after we drop some useless columns, the `units` column still contain NA values in the form of character data. Also, we need to separate Domain Category column to get a detailed and tidy data frame. 
+```{r eval=FALSE}
+## drop useless columns
+before_cols = colnames(strawb_chem)
+T = NULL
+x = length(before_cols)
+
+for(i in 1:x){
+  b <- length(unlist(strawb_chem[,i] %>% unique()) )
+  T <- c(T,b)
+}
+
+drop_cols <- before_cols[which(T == 1)]
+strawb_chem <- strawb_chem %>% dplyr::select(!all_of(drop_cols))
+after_cols = colnames(strawb_chem)
+temp1 <- strawb_chem %>% dplyr::select(units) %>% distinct()
+strawb_chem <- strawb_chem %>% separate(col=`Domain Category`, 
+                          into = c("dc1", "chem_name"),
+                          sep = ":", 
+                          fill = "right")
+aa  <- grep("measured in", 
+            strawb_chem$items, 
+            ignore.case = T)
+length(aa)
+
+temp1 <- strawb_chem %>% dplyr::select(chem_name) %>% unique()
+# length(unlist(temp1))
+
+# sum(strawb_chem$Domain == strawb_chem$dc1) == dim(strawb_chem)[1]
+
+strawb_chem <-strawb_chem %>% dplyr::select(Year, State, items, units, dc1, chem_name, Value)
+strawb_chem$items <- str_remove_all(strawb_chem$items, "MEASURED IN ")
+strawb_chem <- strawb_chem %>% rename(c(category = units, units = items))
+
+## Do all the dc1 entries begen with "Chemical"?
+
+bb  <- grep("CHEMICAL, ", 
+            strawb_chem$dc1, 
+            ignore.case = T)
+# length(bb)
+chem <- 1:2112
+
+non_chem_rows <- setdiff(chem, bb)
+# length(non_chem_rows)
+
+## Now let's look at these rows in a tibble
+
+temp1 <- strawb_chem %>% slice(non_chem_rows)
+
+## These non_chem_rows refers to fertilizers  
+
+## keep them  
+
+fertilizers <- temp1
+
+## Now clean the chem_name column.
+## now remove "CHEMICAL, " from the entries in the dc1
+## and rename the column chem_types
+
+
+strawb_chem$dc1 <- str_remove_all(strawb_chem$dc1, "CHEMICAL, ")
+
+# strawb_chem$dc1 %>% unique()
+
+ strawb_chem <- strawb_chem %>% rename(chem_types = dc1)
+
+## now fix the chem_name column
+
+## remove the parens
+
+strawb_chem$chem_name <- str_remove_all(strawb_chem$chem_name, "\\(")
+
+strawb_chem$chem_name <- str_remove_all(strawb_chem$chem_name, "\\)")
+
+## separate chem_name and chem_code
+
+strawb_chem <- strawb_chem %>% separate(col = chem_name,
+                          into = c("chem_name","chem_code"),
+                          sep = "=",
+                          fill = "right") 
+
+
+## now fill in a label fot NA in the category column
+
+## first check that "lb" in the units column corresponds 
+## to NA in the category column
+
+
+aa <- which(strawb_chem$units == " LB")
+
+bb <- which(is.na(strawb_chem$category))
+
+# sum(aa==bb)==length(aa)
+```
+After getting rid of redundant strings after separating `Domain` and `Domain Category` columns, chemicals now have an tidy individual column for us identify a specific type of chemicals used in strawberry cultivation.Besides, we found 45 entries starts with some other strings: "FERTILIZER" instead of "CHEMICAL", we decide to keep them for a full analysis of chemicals.
+
+
+```{r eval=FALSE}
+##-----------
+# Clean up the workspace
+
+rm(aa,after_cols,b,bb,before_cols,chem,chem_rows,chem_rows_1,chem_rows_2,cnames,
+   i,drop_cols,x,T,type_organic,org_rows,ins,ins_2,items_organic,non_chem_rows,
+   Domain_Category_organic,Domain_organic,temp1)
+```
+```{r}
+# strawb_chem %>% select(chem_name) %>% distinct()
+```
+So far, we have a clean chemicals subset. The number of different chemicals listed in our dataset is 172. 
+
+
+### Organic strawberry subset
+Next subset to clean is organic data. We apply similar approaches to select columns, and expand columns to create a detailed and tidy data frame. 
+
+```{r}
+##begin to clean organic data
+temp1 <- strawb_organic %>% dplyr::select(Year,State) %>% distinct()
+
+# unique(strawb_organic$`Domain`)
+# unique(strawb_organic$`Domain Category`)
+# unique(strawb_organic$units)
+strawb_organic$units <- str_remove_all(strawb_organic$units, "MEASURED IN ")
+
+#clean organic strawberry data
+strawb_organic <- strawb_organic[!names(strawb_organic) %in% c("Period","State ANSI","Strawberries", "Domain", "Domain Category")]
+#type, items and units need to be cleaned
+strawb_organic
+```
+### non-organic strawberry data
+
+Similarly, we have a much cleaner non-organic data frame. Now we decided to divide the non-organic data subset into marketing year and year subsets for further analysis. 
+
+```{r}
+##begin to clean non_organic data
+# unique(strawb_non_organic$State) # "CALIFORNIA" "FLORIDA"    "NEW YORK"   "OREGON"
+
+# unique(strawb_non_organic$Strawberries) 
+# "STRAWBERRIES - PRICE RECEIVED" "STRAWBERRIES"
+# strawb_non_organic[strawb_non_organic$Strawberries=="STRAWBERRIES - PRICE RECEIVED",]
+#all in marketing year
+
+# unique(strawb_non_organic$type) 
+# " MEASURED IN $ / CWT"; " FRESH MARKET - PRICE RECEIVED";
+#" PROCESSING - PRICE RECEIVED"; " BEARING - APPLICATIONS" 
+# strawb_non_organic %>% dplyr::select(type, items) %>% unique()
+# strawb_non_organic[strawb_non_organic$Strawberries=="STRAWBERRIES - PRICE RECEIVED",]
+# strawb_non_organic[strawb_non_organic$type==" MEASURED IN $ / CWT",]
+# length(which(is.na(strawb_non_organic$items)))
+
+#when Strawberries==STRAWBERRIES - PRICE RECEIVED, tyoe==MEASURED IN $ / CWT, items==NA
+#at this time, we will see all Period=="MARKETING YEAR". 
+#So, is there any relationship between them?
+x5 <- strawb_non_organic[strawb_non_organic$Period=="MARKETING YEAR",]
+
+# About all Period=="MARKETING YEAR", Domain=="TOTAL", types==	"NOT SPECIFIED"
+# if we do not have "MARKETING YEAR", is there some pattern about value?
+x6 <- setdiff(strawb_non_organic,x5)
+# only marketing year have " MEASURED IN $ / CWT", " FRESH MARKET - PRICE RECEIVED" and " PROCESSING - PRICE RECEIVED" type;
+# year only have " BEARING - APPLICATIONS" type
+# unique(strawb_non_organic$items) 
+strawb_non_organic$items <- str_remove_all(strawb_non_organic$items, "MEASURED IN ")
+
+
+# unique(strawb_non_organic$units) # same operation just like chem 
+#delete directly
+
+# unique(strawb_non_organic$Domain)
+#delete
+
+# unique(strawb_non_organic$`Domain Category`)
+strawb_non_organic <- strawb_non_organic %>% separate(col=`Domain Category`, 
+                          into = c("types", "name"),
+                          sep = ":", 
+                          fill = "right")
+
+# strawb_non_organic %>% dplyr::select(name) %>% unique()
+# sum(strawb_non_organic$Domain == strawb_non_organic$types) == dim(strawb_non_organic)[1] #FALSE
+
+# Now, we know the difference between them
+x1 <- strawb_non_organic[(strawb_non_organic$Domain == strawb_non_organic$types) == FALSE,]
+#All the Domain==TOTAL and types == NOT SPECIFIED
+#delete Domain, keep types.
+## Do all the types entries begen with "Chemical"?
+x2 <- grep("CHEMICAL, ", 
+           strawb_non_organic$types, 
+            ignore.case = T)
+# length(x2)
+##if they are not entries begen with "Chemical", what kind of thing they begin with?
+x3 <- strawb_non_organic[grepl("CHEMICAL, ",strawb_non_organic$types),]
+# nrow(x3)
+x4 <- setdiff(strawb_non_organic, x3)
+# View(x4)
+# unique(x4$types)
+#"NOT SPECIFIED" "FERTILIZER" 
+#at this time, we can divide subset into chemical and FERTILIZER
+```
+By checking the unique values of `types` columns, we decide to divide non-organic dataset into chemical and FERTILIZER subsets.
+
+```{r}
+#clean chem names
+# strawb_non_organic %>% dplyr::select(name) %>% unique() # 173
+#remove the parens
+strawb_non_organic$name <- str_remove_all(strawb_non_organic$name, "\\(")
+strawb_non_organic$name <- str_remove_all(strawb_non_organic$name, "\\)")
+## separate name and code
+strawb_non_organic <- strawb_non_organic %>% separate(col = name,
+                          into = c("name","code"),
+                          sep = "=",
+                          fill = "right"
+) 
+
+#delete useless columns
+strawb_non_organic <- strawb_non_organic[!names(strawb_non_organic) %in% c("State ANSI","types")]
+
+#final slice non-organic strawberries dataset into 3 dataset:
+#first, slice data according to Period (marketing year and year);
+#Next, slice year data according to Domain or chemical
+strawb_non_organic_my <- strawb_non_organic[strawb_non_organic$Period=="MARKETING YEAR",]
+strawb_non_organic_y <- setdiff(strawb_non_organic, strawb_non_organic_my)
+strawb_non_organic_chemical <- strawb_non_organic[grepl("CHEMICAL, ",strawb_non_organic$Domain),]
+strawb_non_organic_fertilizers <- setdiff(strawb_non_organic_y, strawb_non_organic_chemical)
+```
+
+Now, we have all datasets tidied: 
+* strawb_organic
+* strawb_non_organic_my*
+* strawb_non_organic_chemical*
+* strawb_non_organic_fertilizers*
+
+
+# Exploratory Data Analysis
+
+According to the Shopper’s Guide to Pesticides in Produce article, people now are more aware of the public health, so organic strawberries will be more and more important in the future since there are less hazardous chemicals used to grow strawberries. This leads us to explore organic strawberry subset first.
+
+## organic strawberry 
+
+NEW JERSEY have no data for `Value`column in 2019. But we can see its CWT decrease. So, we impute this NA according to proportion.
+
+```{r warning=FALSE}
+e1 <- strawb_organic[strawb_organic$type==" ORGANIC - SALES", ]
+# View(e1)
+
+
+e1$Value <- as.numeric(e1$Value)
+e1[17, "Value"] = 73017.4
+e1m <- e1[e1$items == " MEASURED IN $", ]
+e1w <- e1[e1$items == " MEASURED IN CWT", ]
+datao <- data.frame(Year = e1$Year,State = e1$State, Value = e1$Value)
+#first
+data1 <- e1m %>% dplyr::select("Year", "State", "Value")
+t1 <- e1m %>% pivot_wider(names_from = State, values_from = Value)
+```
+
+### Sales trend for organic strawberries
+
+Since the sales data is collected either measured in $ or CWT. We draw two plots for each measurement to avoid any confusion that may exist.
+
+Below is a plot that describes the sales measured in $ for organic strawberries in 2016 and 2019.
+
+```{r,echo=FALSE,fig.width=9.3}
+ggplot(e1m) +
+  aes(x = Year, y = Value, colour = State) +
+  geom_point(shape = "square", size = 3.95) +
+  scale_color_hue(direction = 1) +
+  labs(
+    y = "Sales ",
+    title = "Sales for Organic Strawberry",
+    subtitle = "Measured in $",
+    caption = "Source: US Cencus data"
+  ) +
+  theme_minimal() +
+  facet_wrap(vars(State), scales = "free_y")
+
+
+```
+
+To have a better sense of whethe the sales increase or decrease, we change the plot type into line instead of point.
+
+```{r echo=FALSE}
+ggplot(e1m) +
+  aes(x = Year, y = Value, colour = State) +
+  geom_line(size = 0.5) +
+  scale_color_hue(direction = 1) +
+  labs(
+    y = "Sales ",
+    title = "Sales for Organic Strawberry",
+    subtitle = "Measured in $",
+    caption = "Source: US Cencus data"
+  )+
+  theme_minimal() +
+  facet_wrap(vars(State), scales = "free_y")
+
+```
+
+
+```{r,fig.width=9.3, echo=FALSE}
+
+ggplot(e1w) +
+  aes(x = Year, y = Value, colour = State) +
+  geom_line(size = 0.5) +
+  scale_color_hue(direction = 1) +
+  labs(
+    y = "Sales ",
+    title = "Sales for Organic Strawberry",
+    subtitle = "Measured in CWT",
+    caption = "Source: US Cencus data"
+  )+
+  theme_minimal() +
+  facet_wrap(vars(State), scales = "free_y")
+```
+Above is a plot that describes the sales measured in CWT for organic strawberries.
+We find there is a discrepancy for sales in California using different measurements. Without full information of the quantities and prices and why some values of coefficient variation are missing, We cannot infer anything about why this discrepancy would appear. We believe that if the conversion between CWT and sales can be added into data preparation, we will be able to discover more convicing results about how sales change between different states during 2016 - 2019.
+
+## non_organic:
+
+```{r echo=FALSE}
+##marketing year:
+e2 <- strawb_non_organic_my[strawb_non_organic_my$type==" MEASURED IN $ / CWT", ]
+e2 %>% 
+  arrange(as.numeric(Value)) %>%
+  ggplot(aes(x = Year, y = as.numeric(Value)))+
+  geom_line(aes(group = State, color = State))+
+  labs(title = NULL,x = "Year" , y = "STRAWBERRIES - PRICE")
+```
+As for the year of collected data, we find that is we want to analysis sales of per CWT in different states there are so many nan values. However, if we choose the marketing year data, all the strawberries are non organic strawberries. And during 2016-2021, most of states sold of per CWT decreased compared with 2016, except California. In addition, the record of saling of per CWT in New York and Oregon disappeared from 2018. But we do not know why. In the future, we can find more documents to know the reason of that.
+
+
+### fertilizers
+```{r echo=FALSE}
+unique(strawb_non_organic_fertilizers$State) #2
+unique(strawb_non_organic_fertilizers$name) #4
+#strawb_non_organic_fertilizers %>% dplyr::select(items, units) %>% distinct()
+#AVG only shows in " LB / ACRE / APPLICATION" and " LB / ACRE / YEAR"
+#choose one
+# e3 <- strawb_non_organic_fertilizers[strawb_non_organic_fertilizers$items==" LB", ]
+# e3 <- strawb_non_organic_fertilizers[strawb_non_organic_fertilizers$items==" LB / ACRE / APPLICATION", ]
+e3 <- strawb_non_organic_fertilizers[strawb_non_organic_fertilizers$items==" LB / ACRE / YEAR", ]
+```
+These fertilizers are natural and safe for the growth of strawberries.
+
+## chemical
+### Analysis on state
+
+Since California contributes to 80% of the strawberry production and followed by Florida and Oregon, we are interested how many different chemicals are listed by state and if California use more different chemicals than other states.
+```{r eval=FALSE}
+
+# number of different chemicals listed by different states
+# strawb_chem %>% group_by(State) %>% summarise(unqiue_chems = n_distinct(chem_name))
+
+```
+Based on our analysis, we can say that California has a higher usage of different chemicals(139) than others (116 for Florida and 21 for Oregon) and this could be one of reasons why California has the highest production.
+
+```{r}
+unique(strawb$State)
+```
+By examine the `State` column, we can see other states including "NEW JERSEY", "NEW YORK" and "PENNSYLVANIA" are involved in strawberry roduction. If we have more information about more states involved , we can perform an regional analysis in U.S where New Jersey, New York, and Pennsylvania can be grouped together as Northeast and Mid-Atlantic United States (Northeast region).
+
+
+```{r echo=FALSE}
+# unique(strawb_non_organic_chemical$State) #"CALIFORNIA" "FLORIDA"    "OREGON"  
+# unique(strawb_non_organic_chemical$items) #" LB" " LB / ACRE / APPLICATION" " LB / ACRE / YEAR"  
+#strawb_non_organic_chemical %>% dplyr::select(items, units) %>% distinct()
+#AVG only shows in " LB / ACRE / APPLICATION" and " LB / ACRE / YEAR"
+e4 <- strawb_non_organic_chemical %>% separate(col=`Domain`,
+                    into = c("category", "detail"),
+                    sep = ",",
+                    fill = "right")
+unique(e4$category) #1
+unique(e4$items) ##" LB" " LB / ACRE / APPLICATION" " LB / ACRE / YEAR"  
+unique(e4$detail)  #" FUNGICIDE"   " HERBICIDE"   " INSECTICIDE" " OTHER"   
+nrow(e4 %>% dplyr::select(detail, name) %>% distinct()) #171
+e4 %>%
+  group_by(detail) %>%
+  count(detail)
+# length(unique(e4$name)) #168
+```
+
+### Hazardous chemicals and safe ones 
+We try to find how many hazardous chemicals mentioned in the "Shoppers Guide to Pesticides in Produce" exists in our dataset. Hazardous chemicals include Carbendazim, Bifenthrin, methyl bromide, 1,3-dichloropropene, chloropicrin, Telone.
+
+```{r}
+## Carbendazim, Bifenthrin, methyl bromide, 1,3-dichloropropene, chloropicrin, Telone
+df_carbendazim <- grep("carbendazim", 
+                       e4$`name`, ignore.case = T)
+# length(df_carbendazim) #0
+df_Bifenthrin <- grep("Bifenthrin", 
+                       e4$`name`, ignore.case = T)
+# length(df_Bifenthrin) #27 #INSECTICIDE
+df_methyl_bromide <- grep("methyl bromide", 
+                      e4$`name`, ignore.case = T)
+# length(df_methyl_bromide) #3 #other
+df_1_3_dichloropropene <- grep("1,3-dichloropropene", 
+                               e4$`name`, 
+                               ignore.case = T)
+# length(df_1_3_dichloropropene) #0
+df_chloropicrin <- grep("chloropicrin", 
+                        e4$`name`, 
+                        ignore.case = T)
+# length(df_chloropicrin) #18 #other
+df_Telone <- grep("Telone", 
+                  e4$`name`, 
+                  ignore.case = T)
+# length(df_Telone) #0
+e5 <- e4 %>%
+  group_by(detail) %>%
+  count(name) %>%
+  arrange(detail,desc(n)) %>%
+  slice_max(n, n = 5)
+e6 <- e4 %>%
+  group_by(detail) %>%
+  count(name) %>%
+  arrange(detail,desc(n)) %>%
+  slice_max(n, n = 5)
+e7 <- e6 %>%
+  group_by(detail) %>%
+  count(detail)
+e5 %>%
+  ggplot(aes(n,fct_reorder(name, n),fill = detail)) +
+  geom_col(show.legend = FALSE) +
+  facet_wrap(~detail, ncol = 2, scales = "free") +
+  labs(x = "count", y = NULL)
+treemap(e5,
+        index=c("detail","name"),
+        vSize="n",
+        type="index"
+) 
+```
+
+A great number of chemicals are used when planting strawberries. We can category them into four types --- fungicide, insecticide, herbicide and others. At here, we substract top5 from each categories to see the situation. According to the picture, we find most people choose to use insecticide and the proportion of people who use others as chemicals is lowest.
+
+Based on our research, safe and natural chemicals to use include Neem Oil and Spinosad. We run a quick check if they are in our chemical dataset. 
+
+```{r warning=FALSE}
+# Neem Oil: 27 matches
+neem_oil_rows<- grep("NEEM OIL", strawb_chem$chem_name, ignore.case=TRUE)
+df_Neem_Oil <- strawb_chem%>% slice(neem_oil_rows)
+tableNeem_Oil<- df_Neem_Oil %>% group_by(State) %>% count()
+
+#Spinosad: 12 matches 
+spinosad_rows<- grep("SPINOSAD", strawb_chem$chem_name, ignore.case=TRUE)
+df_Spinosad <- strawb_chem%>% slice(spinosad_rows)
+tableSpinosad_state<- df_Spinosad %>% group_by(State) %>% count()
+
+```
+Based on our checking, California has 24 matches of neem oil usage and 12 matches of spinosad (while Florida only has 12 matches of neem oil usage). California seems to be cautious about the chemicals relatively as the vast majority of the fresh strawberries sold in this country are grown there. But because of the limited information we have, we cannot conclude California has the best practice to protect public health. 
+
+### Abolished pie plot and donut chart graphes
+```{r echo=FALSE}
+# Bife_used <- grep("BIFENTHRIN",
+#                   strawb_chem$chem_name,
+#                   ignore.case = T)
+# df_Bifenthrin_used <- strawb_chem %>% slice(Bife_used)
+# Year <- c(df_Bifenthrin_used$Year[1],df_Bifenthrin_used$Year[4],df_Bifenthrin_used$Year[10],df_Bifenthrin_used$Year[16],df_Bifenthrin_used$Year[19],df_Bifenthrin_used$Year[22])
+# State <- c(df_Bifenthrin_used$State[1],df_Bifenthrin_used$State[4],df_Bifenthrin_used$State[10],df_Bifenthrin_used$State[16],df_Bifenthrin_used$State[19],df_Bifenthrin_used$State[22])
+# Value <- c(df_Bifenthrin_used$Value[1],df_Bifenthrin_used$Value[4],df_Bifenthrin_used$Value[10],df_Bifenthrin_used$Value[16],df_Bifenthrin_used$Value[19],df_Bifenthrin_used$Value[22])
+# comb_Year_State <- paste(Year, State)
+# cldf_Bifenthrin_used <- data.frame(comb_Year_State,Value)
+# #Pie Plot of Usage of Bifenthrin by Year and State
+# # pie(as.integer(Value), labels = comb_Year_State)
+# 
+# #Donut Chart of Biefenthrin by Year and State
+# sumvalue <- sum(as.integer(Value))
+# cldf_Bifenthrin_used$fractionvalue <- as.integer(Value) / sumvalue
+# cldf_Bifenthrin_used$ymax <- cumsum(cldf_Bifenthrin_used$fractionvalue)
+# cldf_Bifenthrin_used$ymin <- c(0, head(cldf_Bifenthrin_used$ymax, n=-1))
+# cldf_Bifenthrin_used$labelPosition <- (cldf_Bifenthrin_used$ymax + cldf_Bifenthrin_used$ymin) / 2
+# cldf_Bifenthrin_used$label <- paste0(cldf_Bifenthrin_used$comb_Year_State, "\n value: ", cldf_Bifenthrin_used$Value)
+# ggplot(cldf_Bifenthrin_used, aes(ymax=ymax, ymin=ymin, xmax=7, xmin=6, fill=comb_Year_State)) +
+#   geom_rect() +
+#   geom_text( x=3, aes(y=labelPosition, label=label, color=comb_Year_State), size=3) + # x here controls label position (inner / outer)
+#   scale_fill_brewer(palette=3) +
+#   scale_color_brewer(palette=3) +
+#   coord_polar(theta="y") +
+#   xlim(c(-1, 7)) +
+#   theme_void() +
+#   theme(legend.position = "none")
+```
+These two graphes show the percentage of usage of Bifenthrin grouped by Year and State. Bifenthrin is a dangerous varity of chemicals widely used in agriculture. It has been banned for agricultural use in European union countries since July 2019, but it is not a restricted chemical in the United States and is commonly sold in hardware stores. I planned to use these graphes to show the usage of Bifenthrin in California and Florida by years and made a comparison by percentage, but it didn't worked well. So we don't want to rely on these graphs for producing any further analysis.
+
+### Circular barplot
+```{r echo=FALSE, warning=FALSE}
+## Part of plotting circular barplot
+
+## Dataset
+## Drop NAs and Ds
+NA_rows <- grep("(NA)",
+                strawb_non_organic_chemical$Value,
+                ignore.case = T)
+D_rows <- grep("(D)",
+               strawb_non_organic_chemical$Value,
+               ignore.case = T)
+California_non_Organic <- grep("CALIFORNIA",
+                               strawb_non_organic_chemical$State,
+                               ignore.case = T)
+Year_non_Organic <- grep("2016",
+                         strawb_non_organic_chemical$Year,
+                         ignore.case = T)
+ins <- intersect(California_non_Organic, Year_non_Organic)
+used_NA_rows <- intersect(ins, NA_rows)
+used_D_rows <- intersect(ins, D_rows)
+uncleaned_rows <- sort(c(used_NA_rows, used_D_rows), decreasing = FALSE)
+#Clean Dataset
+cleaned_rows <- setdiff(ins, uncleaned_rows)
+cleaned_strawb_non_organic <- strawb_non_organic_chemical %>% slice(cleaned_rows)
+LB_Year_App <- grep("LB / ACRE / APPLICATION",
+                    cleaned_strawb_non_organic$items,
+                    ignore.case = T)
+LB_Year_App_data <- cleaned_strawb_non_organic %>% slice(LB_Year_App)
+
+strawb_non_organic_chemical1 <- LB_Year_App_data %>% arrange(Domain)
+# Create dataset
+data <- data.frame(
+  individual=c(LB_Year_App_data$name),
+  group=c( rep('FUNGICIDE', 24), rep('HERBICIDE', 3), rep('INSECTICIDE', 24), rep('OTHER', 4)),
+  value=round(as.numeric(LB_Year_App_data$Value),4)
+)
+
+# Set a number of 'empty bar' to add at the end of each group
+empty_bar <- 3
+to_add <- data.frame( matrix(NA, empty_bar*nlevels(data$group), ncol(data)) )
+colnames(to_add) <- colnames(data)
+to_add$group <- rep(levels(data$group), each=empty_bar)
+data <- rbind(data, to_add)
+data <- data %>% arrange(group)
+data$id <- seq(1, nrow(data))
+
+# Get the name and the y position of each label
+label_data <- data
+number_of_bar <- nrow(label_data)
+angle <- 90 - 360 * (label_data$id-0.5) /number_of_bar     # I substract 0.5 because the letter must have the angle of the center of the bars. Not extreme right(1) or extreme left (0)
+label_data$hjust <- ifelse( angle < -90, 1, 0)
+label_data$angle <- ifelse(angle < -90, angle+180, angle)
+
+# prepare a data frame for base lines
+base_data <- data %>% 
+  group_by(group) %>% 
+  summarize(start=min(id), end=max(id) - empty_bar) %>% 
+  rowwise() %>% 
+  mutate(title=mean(c(start, end)))
+
+# prepare a data frame for grid (scales)
+grid_data <- base_data
+grid_data$end <- grid_data$end[ c( nrow(grid_data), 1:nrow(grid_data)-1)] + 1
+grid_data$start <- grid_data$start - 1
+grid_data <- grid_data[-1,]
+
+# Plotting 
+# Make the plot
+p <- ggplot(data, aes(x=as.factor(id), y=value, fill=group)) +       # Note that id is a factor. If x is numeric, there is some space between the first bar
+  
+  geom_bar(aes(x=as.factor(id), y=value, fill=group), stat="identity", alpha=0.5) +
+  
+  # Add a val=100/75/50/25 lines. I do it at the beginning to make sur barplots are OVER it.
+  geom_segment(data=grid_data, aes(x = end, y = 80, xend = start, yend = 80), colour = "grey", alpha=1, size=0.03 , inherit.aes = FALSE ) +
+  geom_segment(data=grid_data, aes(x = end, y = 60, xend = start, yend = 60), colour = "grey", alpha=1, size=0.03 , inherit.aes = FALSE ) +
+  geom_segment(data=grid_data, aes(x = end, y = 40, xend = start, yend = 40), colour = "grey", alpha=1, size=0.03 , inherit.aes = FALSE ) +
+  geom_segment(data=grid_data, aes(x = end, y = 20, xend = start, yend = 20), colour = "grey", alpha=1, size=0.03 , inherit.aes = FALSE ) +
+  
+  # Add text showing the value of each 100/75/50/25 lines
+  annotate("text", x = rep(max(data$id),4), y = c(20, 40, 60, 80), label = c("20", "40", "60", "80") , color="grey", size=1 , angle=0, fontface="bold", hjust=1) +
+  
+  geom_bar(aes(x=as.factor(id), y=value, fill=group), stat="identity", alpha=0.5) +
+  ylim(-500,300) +
+  theme_minimal() +
+  theme(
+    legend.position = "none",
+    axis.text = element_blank(),
+    axis.title = element_blank(),
+    panel.grid = element_blank(),
+    plot.margin = unit(rep(-1,4), "cm") 
+  ) +
+  coord_polar() + 
+  geom_text(data=label_data, aes(x=id, y=value+10, label=individual, hjust=hjust), color="black", fontface="bold",alpha=0.6, size=1.25, angle= label_data$angle, inherit.aes = FALSE ) +
+  
+  # Add base line information
+  geom_segment(data=base_data, aes(x = start, y = -5, xend = end, yend = -5), colour = "black", alpha=0.8, size=0.06 , inherit.aes = FALSE )  +
+  geom_text(data=base_data, aes(x = title, y = -18, label=group), hjust=c(1,1,0,0), colour = "black", alpha=0.8, size=2, fontface="bold", inherit.aes = FALSE)
+  
+p
+```
+This plot is a circular barplot for the LB/Year/App usage of different chemicals in California 2016, grouped by the four different types of chemicals: Fungicide, Herbicide, Insecticide, and the others. The output shows that CHLOROPICRIN is the most common used chemical in measurement of LB/Year/App, and the DICHLOROPROPENE is the second. This two chemicals were used far ahead other types of chemicals. However, CHLOROPICRIN is a very dangerous chemical. It was used as chemical weapons during WWI, and broadly used in agriculture nowadays. From CDC's report, CHLOROPICRIN used to cause toxication of 27 workers in a textile factory, and one death cases is reported. One year before the starting date of this dataset, California starts to limit the usage of this chemical. "In California experience with acute effects of chloropicrin when used as a soil fumigant for strawberries and other crops led to the release of regulations in January 2015 creating buffer zones and other precautions to minimize exposure of farm workers, neighbors, and passersby." ("Control Measures for Chloropicrin". California Department of Pesticide Regulation. January 6, 2015). CHILOROPICRIN is still the most common used chemical after the policy enacted.
+
+
+
+
+
+
+
+
